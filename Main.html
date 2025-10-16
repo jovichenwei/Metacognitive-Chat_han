@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Metacognitive Chat · TRAP Prototype (Chat + Streaming + Rich)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body { height: 100%; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 8px; }
+    .typing::after { content: '▌'; animation: blink 1s infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-indigo-50 via-slate-50 to-emerald-50 text-slate-900">
+  <div id="root" class="min-h-screen"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    /* ----------------- UI Helpers ----------------- */
+    const Badge = ({ children, className = "" }) => (
+      <span className={"inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium shadow-sm " + className}>{children}</span>
+    );
+
+    const Section = ({ title, subtitle, right, children }) => (
+      <div className="bg-white/70 backdrop-blur rounded-2xl shadow-sm ring-1 ring-black/5 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold tracking-tight text-gray-900">{title}</h2>
+            {subtitle && <p className="text-sm text-gray-600 mt-0.5">{subtitle}</p>}
+          </div>
+          {right}
+        </div>
+        <div className="mt-4">{children}</div>
+      </div>
+    );
+
+    const ConfidenceBar = ({ value }) => {
+      const clamped = Math.max(0, Math.min(1, value));
+      const pct = Math.round(clamped * 100);
+      const color = clamped > 0.85 ? "bg-emerald-500" : clamped > 0.6 ? "bg-amber-500" : "bg-rose-500";
+      return (
+        <div className="w-full">
+          <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
+            <span className="inline-flex items-center gap-1">Calibrated Confidence
+              <span className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-slate-200 text-[10px] text-slate-700" title="Confidence 經 isotonic 模型校準；指標：ECE/Brier 僅示意。">?</span>
+            </span>
+            <span className="font-medium text-gray-800">{pct}%</span>
+          </div>
+          <div className="h-2.5 w-full rounded-full bg-gray-100 overflow-hidden ring-1 ring-inset ring-black/5">
+            <div className={`h-full ${color} transition-all`} style={{ width: `${pct}%` }} />
+          </div>
+          <p className="text-[10px] text-gray-500 mt-1">ECE 2.8% · Brier 0.12（示意）</p>
+        </div>
+      );
+    };
+
+    const Pill = ({ label, score }) => {
+      const color = score > 0.85 ? "text-emerald-700 bg-emerald-50 ring-emerald-200" : score > 0.6 ? "text-amber-700 bg-amber-50 ring-amber-200" : "text-rose-700 bg-rose-50 ring-rose-200";
+      const pct = Math.round(score * 100);
+      return <div className={`rounded-xl ring-1 px-2.5 py-1 text-xs font-medium ${color}`}>{label}: {pct}%</div>;
+    };
+
+    const Step = ({ idx, title, status }) => {
+      const colors = { done: "bg-emerald-100 text-emerald-800 ring-emerald-200", active: "bg-blue-100 text-blue-800 ring-blue-200 animate-pulse", pending: "bg-gray-100 text-gray-700 ring-gray-200" };
+      return (
+        <div className="flex items-start gap-3">
+          <div className={`h-6 w-6 rounded-full grid place-items-center text-xs font-bold ring-1 ${colors[status]}`}>{idx}</div>
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium text-gray-900">{title}</p>
+            </div>
+            <div className="mt-1 h-[3px] w-full rounded-full bg-gray-100 overflow-hidden">
+              <div className={`h-full ${status === "done" ? "bg-emerald-500" : status === "active" ? "bg-blue-500" : "bg-gray-300"}`} style={{ width: status === "done" ? "100%" : status === "active" ? "60%" : "10%" }} />
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const EvidenceCard = ({ title, url, date, trust = 0.9, supports = [] }) => {
+      const pct = Math.round(trust * 100);
+      const color = trust > 0.85 ? "text-emerald-700 bg-emerald-50 ring-emerald-200" : trust > 0.6 ? "text-amber-700 bg-amber-50 ring-amber-200" : "text-rose-700 bg-rose-50 ring-rose-200";
+      return (
+        <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/60">
+          <div className="flex items-center justify-between">
+            <a href={url} target="_blank" rel="noreferrer" className="text-sm font-medium text-blue-700 hover:underline">{title}</a>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full ring-1 ${color}`}>trust {pct}%</span>
+          </div>
+          <p className="text-[11px] text-gray-500 mt-1">Checked: {date}</p>
+          {supports.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1 text-[10px]">
+              {supports.map((s,i)=> (
+                <span key={i} className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-700 ring-1 ring-slate-200">supports {s}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const Radar = ({ values = [0.8, 0.7, 0.6, 0.9, 0.75], labels = ["Clarity","Freshness","Coverage","Consistency","Noise"] }) => {
+      const size = 160, cx = size/2, cy = size/2, r = 60, n = values.length;
+      const angle = (i) => (Math.PI * 2 * i) / n - Math.PI/2;
+      const pts = values.map((v, i) => [cx + Math.cos(angle(i)) * r * v, cy + Math.sin(angle(i)) * r * v]);
+      const outline = Array.from({length:n}, (_,i)=>[cx + Math.cos(angle(i)) * r, cy + Math.sin(angle(i)) * r]);
+      return (
+        <div className="flex items-center gap-4">
+          <svg width={size} height={size} className="shrink-0">
+            <circle cx={cx} cy={cy} r={r} className="fill-none stroke-gray-200" />
+            {[0.25,0.5,0.75].map((t,i)=> (
+              <circle key={i} cx={cx} cy={cy} r={r*t} className="fill-none stroke-gray-100" />
+            ))}
+            {outline.map((p,i)=> (
+              <line key={i} x1={cx} y1={cy} x2={p[0]} y2={p[1]} className="stroke-gray-200" />
+            ))}
+            <polygon points={pts.map(p=>p.join(",")).join(" ")} className="fill-blue-500/30 stroke-blue-600" />
+          </svg>
+          <div className="grid grid-cols-1 gap-1 text-[12px] text-gray-700">
+            {labels.map((l,i)=> (
+              <div key={l} className="flex items-center gap-2">
+                <span className="h-1.5 w-8 rounded-full bg-blue-500/60" />
+                <span className="w-28">{l}</span>
+                <span className="tabular-nums text-gray-900 font-medium">{Math.round(values[i]*100)}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    // --- Compact pro widgets for TRAP ---
+    const MetricRow = ({label, value, hint}) => (
+      <div className="flex items-center justify-between text-[12px]">
+        <span className="text-gray-600">{label}</span>
+        <div className="flex items-center gap-2">
+          {hint && <span className="text-[10px] text-gray-400">{hint}</span>}
+          <span className="font-medium tabular-nums">{value}</span>
+        </div>
+      </div>
+    );
+
+    const JSONBlock = ({obj}) => (
+      <pre className="text-[11px] leading-relaxed bg-slate-900 text-slate-100 rounded-xl p-3 overflow-auto ring-1 ring-black/10">{JSON.stringify(obj, null, 2)}</pre>
+    );
+
+    const Dot = ({status='ok',label}) => {
+      const map = { ok: 'bg-emerald-500', warn: 'bg-amber-500', error: 'bg-rose-500' };
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px]">
+          <span className={`inline-block h-2.5 w-2.5 rounded-full ${map[status]||map.ok}`} />
+          {label && <span className="text-gray-700">{label}</span>}
+        </span>
+      );
+    };
+
+    const RankingBar = ({rows}) => {
+      const max = Math.max(...rows.map(r=>r.total));
+      return (
+        <div className="space-y-1">
+          {rows.sort((a,b)=>b.total-a.total).map(r=> (
+            <div key={r.name} className="flex items-center gap-2 text-[12px]">
+              <div className="w-16 shrink-0 text-gray-700">{r.name}</div>
+              <div className="flex-1 h-2 rounded-full bg-gray-100 ring-1 ring-black/5 overflow-hidden">
+                <div className="h-full bg-indigo-500" style={{width: `${(r.total/max)*100}%`}} />
+              </div>
+              <div className="w-14 text-right tabular-nums font-medium">{r.total.toFixed(3)}</div>
+            </div>
+          ))}
+        </div>
+      );
+    };
+
+    const Spark = ({values=[0.3,0.3,0.3]}) => {
+      const w=60,h=18,p=2; // tiny sparkline
+      const xs = values.map((_,i)=> p + (i*(w-2*p))/(values.length-1));
+      const ys = values.map(v=> h - (p + v*(h-2*p)));
+      const points = xs.map((x,i)=> `${x},${ys[i]}`).join(' ');
+      return (
+        <svg width={w} height={h} className="shrink-0">
+          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1" className="text-indigo-600"/>
+        </svg>
+      );
+    };
+
+    const CityTable = ({weights, rows}) => (
+      <div className="overflow-hidden rounded-xl ring-1 ring-black/5">
+        <div className="grid grid-cols-6 text-[12px] bg-slate-50 px-3 py-2 font-medium text-gray-700">
+          <div>城市</div><div>Climate×{weights.climate}</div><div>Budget×{weights.budget}</div><div>Activity×{weights.activity}</div><div>Total</div><div className="text-right pr-2">Mix</div>
+        </div>
+        {rows.map((r,i)=> (
+          <div key={i} className="grid grid-cols-6 text-[12px] px-3 py-2 border-t border-gray-100 items-center">
+            <div className="font-medium text-gray-900">{r.name}</div>
+            <div>{(r.climate*weights.climate).toFixed(3)} <span className="text-gray-400">({r.climate.toFixed(2)})</span></div>
+            <div>{(r.budget*weights.budget).toFixed(3)} <span className="text-gray-400">({r.budget.toFixed(2)})</span></div>
+            <div>{(r.activity*weights.activity).toFixed(3)} <span className="text-gray-400">({r.activity.toFixed(2)})</span></div>
+            <div className="font-semibold">{r.total.toFixed(3)}</div>
+            <div className="flex justify-end"><Spark values={[r.climate, r.budget, r.activity]} /></div>
+          </div>
+        ))}
+      </div>
+    );
+
+    const Tabs = ({tabs}) => {
+      const [i, setI] = React.useState(0);
+      return (
+        <div>
+          <div className="flex flex-wrap gap-2">
+            {tabs.map((t,idx)=> (
+              <button key={t.label} onClick={()=>setI(idx)} className={`px-2.5 py-1 rounded-lg text-[12px] ring-1 ${i===idx? 'bg-slate-900 text-white ring-slate-900':'bg-white text-slate-700 ring-black/10 hover:bg-slate-50'}`}>{t.label}</button>
+            ))}
+          </div>
+          <div className="mt-3">{tabs[i].content}</div>
+        </div>
+      );
+    };
+
+    /* ----------------- Chat pieces ----------------- */
+    const Bubble = ({ role, children, isTyping, onClick }) => {
+      const isUser = role === 'user';
+      return (
+        <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} w-full`}>
+          <div onClick={onClick} className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm shadow-sm ring-1 ${isUser ? 'bg-indigo-600 text-white ring-indigo-500' : 'bg-white/80 ring-black/5 text-gray-900'} ${onClick ? 'cursor-pointer' : ''}`}>
+            <span className={isTyping ? 'typing' : ''} style={{ whiteSpace: 'pre-wrap' }}>{children}</span>
+          </div>
+        </div>
+      );
+    };
+
+    function generateAssistantMeta(revision = false) {
+      const common = {
+        weights: { climate: 0.45, budget: 0.30, activity: 0.25 },
+        formula: "total = 0.45×S_climate + 0.30×S_budget + 0.25×S_activity",
+        calibration: { method: 'Isotonic (simulated)', ece: 0.028, brier: 0.12 },
+        uncertainty: { data: 0.25, model: 0.15, noise: 0.10 },
+        pipeline: [
+          'Parse intent → 旅遊規劃(11月) with constraints',
+          'Collect climatology & price priors (2019–2025 window)',
+          'Normalize metrics → [0,1] via city-wise min–max',
+          'Score using weighted sum (see formula)',
+          'Calibrate confidence via isotonic mapping',
+          'Derive triggers for re‑perception & human‑in‑loop'
+        ],
+        triggers: [
+          'ΔTemp between sources > 1.5°C',
+          'Missing data coverage > 20% for any city',
+          'Confidence < 0.6 or ECE > 0.05'
+        ],
+        assumptions: [
+          '出發地相同且為經濟艙均值',
+          '住宿等級為中階旅宿 (3★–3.5★)',
+          '活動密度以步行可達景點/館舍數近似'
+        ]
+      };
+
+      if (!revision) {
+        return {
+          ...common,
+          conf: 0.78,
+          city: '東京',
+          temps: { Tokyo: '20 / 12–14°C', Rome: '17 / 10–12°C', Seoul: '10–15°C' },
+          reasons: [
+            { title: '蒐集歷史氣候資料', status: 'done' },
+            { title: '比較舒適度與降雨', status: 'active' },
+            { title: '整合預算與行程', status: 'pending' },
+          ],
+          perception: { clarity: 0.82, freshness: 0.72, coverage: 0.68, consistency: 0.74, noise: 0.88 },
+          sources: [
+            { t: 'WeatherSpark 2015–2023', d: '2025-10-12', u: 'https://weatherspark.com', trust: 0.87, supports: ['climate'] },
+            { t: 'Meteostat Climatology', d: '2025-10-09', u: 'https://meteostat.net', trust: 0.84, supports: ['climate'] },
+            { t: 'Expedia Avg Fare (2019–2024)', d: '2025-10-10', u: 'https://www.expedia.com', trust: 0.83, supports: ['budget'] },
+          ],
+          cityScores: [
+            { name: '東京', climate: 0.80, budget: 0.62, activity: 0.88 },
+            { name: '羅馬', climate: 0.76, budget: 0.69, activity: 0.86 },
+            { name: '首爾', climate: 0.70, budget: 0.75, activity: 0.72 }
+          ].map(c => ({ ...c, total: +(0.45*c.climate + 0.30*c.budget + 0.25*c.activity).toFixed(3) })),
+          confidence_factors: [
+            { label: '年份一致性', value: '中', note: '來源年份 2015–2023（非完全對齊）' },
+            { label: '來源分歧', value: '低', note: '兩來源溫差 < 1.0°C' },
+            { label: '缺補率', value: '低', note: '缺失 < 10%' }
+          ],
+          triggersFired: { deltaTemp: false, missing: false, lowConfidence: false },
+          reflection: '東京看似最舒適，但東京數據年份分散，信心下調 10%。建議出發前再次核對近三年資料。'
+        };
+      }
+      return {
+        ...common,
+        conf: 0.91,
+        city: '羅馬',
+        temps: { Tokyo: '15–17 / 10–12°C', Rome: '17 / 10–12°C', Seoul: '10–15°C' },
+        reasons: [
+          { title: '重新抓取 2019–2025 同期資料', status: 'done' },
+          { title: '一致性檢查（來源交叉比對）', status: 'done' },
+          { title: '重新計算舒適指數與預算', status: 'active' },
+        ],
+        perception: { clarity: 0.92, freshness: 0.86, coverage: 0.78, consistency: 0.89, noise: 0.93 },
+        sources: [
+          { t: 'WeatherSpark 2019–2025', d: '2025-10-15', u: 'https://weatherspark.com', trust: 0.95, supports: ['climate'] },
+          { t: 'Meteostat Monthly Normals', d: '2025-10-15', u: 'https://meteostat.net', trust: 0.9, supports: ['climate'] },
+          { t: 'Expedia Avg Fare (2019–2025)', d: '2025-10-14', u: 'https://www.expedia.com', trust: 0.88, supports: ['budget'] },
+        ],
+        cityScores: [
+          { name: '東京', climate: 0.74, budget: 0.60, activity: 0.87 },
+          { name: '羅馬', climate: 0.82, budget: 0.73, activity: 0.84 },
+          { name: '首爾', climate: 0.68, budget: 0.76, activity: 0.71 }
+        ].map(c => ({ ...c, total: +(0.45*c.climate + 0.30*c.budget + 0.25*c.activity).toFixed(3) })),
+        confidence_factors: [
+          { label: '年份一致性', value: '高', note: '來源時間窗 2019–2025 對齊' },
+          { label: '來源分歧', value: '低', note: '兩來源溫差 < 0.6°C' },
+          { label: '缺補率', value: '低', note: '缺失 < 5%' }
+        ],
+        triggersFired: { deltaTemp: false, missing: false, lowConfidence: false },
+        reflection: '修正原因：東京原始樣本混入不一致的年份，導致偏高。已統一時間窗並再驗證，結論改為羅馬最佳。'
+      };
+    }
+
+    function formatRichReply(meta, userInput) {
+      const when = new Date().toLocaleString();
+      return (
+`【摘要】\n${meta.city} 最符合你的條件（舒適度、預算、活動多樣）。目前自信度：${Math.round(meta.conf*100)}%。\n\n`+
+`【為什麼】\n1. 氣候舒適：11 月日夜溫約 ${meta.temps.Rome}（羅馬）/ ${meta.temps.Tokyo}（東京）/ ${meta.temps.Seoul}（首爾）；落在 12–22°C 區間比例較高。\n2. 預算評估：機票與住宿均價在可接受區間（以 2019–2025 平均為基準）。\n3. 活動密度：城市步行友善、博物館與美食密集度高，雨天替代方案多。\n\n`+
+`【行程草案（3 日）】\nDay 1：抵達與市中心步行路線 → 傍晚地標；晚餐推薦在地特色餐館。\nDay 2：上午博物館/戶外景點 → 下午咖啡文化探訪 → 夜間散步與甜點。\nDay 3：近郊半日遊或市場採買 → 下午返回。\n\n`+
+`【預算粗估】\n航班：以平均票價區間估算；住宿：中等旅宿 2 晚；餐飲與交通：依城市均價計。實際價格會因出發地與時間波動。\n\n`+
+`【依據與限制】\n- 依據：${meta.sources.map(s=>s.t).join('、')}（示範資料）。\n- 限制：歷史均值不含突發氣候；若需更精準，建議加入分位數與即時天氣。\n\n`+
+`【TRAP 摘要】\nPerception：Clarity ${Math.round(meta.perception.clarity*100)}%、Freshness ${Math.round(meta.perception.freshness*100)}%。\nReasoning：${meta.reasons.map((r,i)=>`${i+1}.${r.title}`).join(' / ')}。\nTransparency：來源可信度分佈見右側卡片。\nAdaptation：若資料年份不一致，啟動統一時間窗；Confidence < 60% 時建議再感知/人審。\n\n`+
+`【時間戳】${when}\n`)
+    }
+
+    function App() {
+      const [messages, setMessages] = useState([
+        { id: 1, role: 'assistant', text: '嗨！告訴我你的條件：氣候、預算、活動偏好，我會用元認知方式幫你推薦。' }
+      ]);
+      const [input, setInput] = useState('11 月去旅遊：東京/首爾/羅馬，條件＝氣候舒適 + 預算合理 + 活動多樣？');
+      const [version, setVersion] = useState(1);
+      const [selectedIdx, setSelectedIdx] = useState(null);
+      const [isStreaming, setIsStreaming] = useState(false);
+      const [speed, setSpeed] = useState('fast'); // slow | normal | fast
+      const chatEndRef = useRef(null);
+
+      // 🔒 固定畫面：移除自動捲動（若要恢復，請參考下方註解）
+      // useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isStreaming]);
+      // 或：只在訊息完成後捲動
+      // useEffect(() => { if (!isStreaming) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+      const lastAssistantWithMeta = React.useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'assistant' && messages[i].meta) return i;
+        }
+        return null;
+      }, [messages]);
+
+      const speedInterval = React.useMemo(() => ({ slow: 48, normal: 28, fast: 14 })[speed] || 48, [speed]);
+
+      // Streaming utility for a specific message index
+      const streamMessageText = (index, fullText, onDone) => {
+        setIsStreaming(true);
+        let i = 0;
+        const id = setInterval(() => {
+          i++;
+          setMessages((m) => m.map((msg, idx) => idx === index ? { ...msg, text: fullText.slice(0, i), isTyping: i < fullText.length } : msg));
+          if (i >= fullText.length) {
+            clearInterval(id);
+            setMessages((m) => m.map((msg, idx) => idx === index ? { ...msg, isTyping: false } : msg));
+            setIsStreaming(false);
+            onDone && onDone();
+          }
+        }, speedInterval);
+      };
+
+      const send = () => {
+        if (!input.trim() || isStreaming) return;
+        const userTurn = { id: Date.now(), role: 'user', text: input.trim() };
+        setMessages((m) => [...m, userTurn]);
+        setInput('');
+
+        // create assistant placeholder + meta
+        const meta = generateAssistantMeta(false);
+        const replyFull = formatRichReply(meta, userTurn.text);
+        const botTurn = { id: Date.now() + 1, role: 'assistant', text: '', meta };
+        const newIndex = messages.length + 1; // where bot will be
+        setMessages((m) => [...m, botTurn]);
+        setVersion((v) => v + 1);
+        setSelectedIdx(newIndex);
+        streamMessageText(newIndex, replyFull);
+      };
+
+      const challenge = () => {
+        if (isStreaming) return;
+        const idx = lastAssistantWithMeta;
+        if (idx == null) return;
+        const meta = generateAssistantMeta(true);
+        const revised = formatRichReply(meta, messages[idx - 1]?.text || '');
+        // replace meta + restart streaming text
+        setMessages((m) => m.map((msg, i) => i === idx ? { ...msg, text: '', meta } : msg));
+        setVersion((v) => v + 1);
+        setSelectedIdx(idx);
+        streamMessageText(idx, revised);
+      };
+
+      const meta = selectedIdx != null && messages[selectedIdx]?.meta ? messages[selectedIdx].meta : (lastAssistantWithMeta != null ? messages[lastAssistantWithMeta].meta : null);
+
+      return (
+        <div className="mx-auto max-w-6xl px-4 py-6 lg:py-8">
+          {/* Header */}
+          <header className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 grid place-items-center rounded-2xl bg-indigo-600 text-white font-bold shadow-sm">MC</div>
+              <div>
+                <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">Metacognitive Chat · TRAP Prototype</h1>
+                <p className="text-xs sm:text-sm text-gray-600">版本 v{version} · （示範）</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              <label className="text-xs text-gray-600">輸出速度</label>
+              <select className="rounded-lg border border-gray-300 text-xs px-2 py-1 bg-white" value={speed} onChange={(e)=>setSpeed(e.target.value)}>
+                <option value="slow">慢</option>
+                <option value="normal">中</option>
+                <option value="fast">快</option>
+              </select>
+              <Badge className="bg-indigo-600 text-white">Chat + Streaming + Rich</Badge>
+            </div>
+          </header>
+
+          {/* 主結論 Ribbon */}
+          {meta && (
+            <div className="mt-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-emerald-600 text-white ring-1 ring-black/5 p-3 flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs uppercase tracking-wide bg-white/20 px-2 py-0.5 rounded-md">Top‑1</span>
+                <span className="text-sm sm:text-base font-semibold">{meta.city}</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs sm:text-sm">
+                <span className="opacity-90">Confidence</span>
+                <span className="font-semibold">{Math.round(meta.conf*100)}%</span>
+              </div>
+            </div>
+          )}
+
+          {/* Main grid */}
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-5 gap-5">
+            {/* Chat Column */}
+            <div className="lg:col-span-3 flex flex-col rounded-2xl bg-white/60 ring-1 ring-black/5 min-h-[70vh]">
+              <div className="px-4 pt-4 pb-2 border-b border-black/5 flex items-center justify-between">
+                <p className="text-sm text-gray-700">對話</p>
+                <div className="text-[11px] text-gray-500">點選 AI 回合可在右側查看 TRAP 細節</div>
+              </div>
+              <div className="flex-1 overflow-auto p-4 space-y-3">
+                {messages.map((m, i) => (
+                  <Bubble key={m.id ?? i} role={m.role} isTyping={!!m.isTyping} onClick={() => m.role==='assistant' && m.meta && setSelectedIdx(i)}>
+                    {m.text}
+                  </Bubble>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+              <div className="p-3 border-t border-black/5">
+                <div className="flex gap-2">
+                  <input className="flex-1 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" value={input} onChange={(e)=>setInput(e.target.value)} placeholder="輸入你的任務或問題…" />
+                  <button onClick={send} disabled={isStreaming} className={`rounded-xl px-4 py-2.5 text-sm font-medium text-white shadow-sm ${isStreaming ? 'bg-gray-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}>{isStreaming ? '生成中…' : '送出'}</button>
+                  <button onClick={challenge} disabled={isStreaming} className={`rounded-xl px-4 py-2.5 text-sm font-medium text-white shadow-sm ${isStreaming ? 'bg-gray-400' : 'bg-amber-600 hover:bg-amber-700'}`}>質疑→再驗證</button>
+                </div>
+              </div>
+            </div>
+
+            {/* Meta Column (TRAP for selected assistant turn) */}
+            <div className="lg:col-span-2 space-y-5">
+              {meta ? (
+                <>
+                  <Section title="Perception" subtitle="模型對輸入的理解與限制 (g(x))" right={
+                    <div className="flex items-center gap-2">
+                      <Pill label="Clarity" score={meta.perception.clarity} />
+                      <Pill label="Freshness" score={meta.perception.freshness} />
+                    </div>
+                  }>
+                    <div className="flex items-center gap-2 flex-wrap text-xs">
+                      <Badge className="bg-blue-50 text-blue-700 ring-1 ring-blue-200">主題：旅遊規劃</Badge>
+                      <Badge className="bg-sky-50 text-sky-700 ring-1 ring-sky-200">條件：氣候 / 預算 / 活動</Badge>
+                      <Badge className="bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-200">地點：東京 / 首爾 / 羅馬</Badge>
+                      <Badge className="bg-amber-50 text-amber-700 ring-1 ring-amber-200">限制：資料年份一致性</Badge>
+                    </div>
+                    <div className="mt-4">
+                      <Radar values={[meta.perception.clarity, meta.perception.freshness, meta.perception.coverage, meta.perception.consistency, meta.perception.noise]} />
+                    </div>
+                  </Section>
+
+                  <Section title="Reasoning Trace" subtitle="思考路徑與狀態 (f)">
+                    <div className="space-y-4">
+                      {meta.reasons.map((r, i) => (
+                        <Step key={i} idx={i + 1} title={r.title} status={r.status} />
+                      ))}
+                    </div>
+                  </Section>
+
+                  <Section title="Output & Transparency" subtitle="結論、依據與校準置信度 (g(f(x), θ))" right={<div className="w-48"><ConfidenceBar value={meta.conf} /></div>}>
+                    <div className="rounded-2xl ring-1 ring-black/5 p-4 bg-white/70">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs text-gray-500">結論</p>
+                          <p className="text-base font-semibold mt-1">{meta.city} 最適合 11 月旅遊</p>
+                          <p className="text-sm text-gray-700 mt-2">溫度（日/夜）：東京 {meta.temps.Tokyo} · 羅馬 {meta.temps.Rome} · 首爾 {meta.temps.Seoul}</p>
+                        </div>
+                        <details className="text-[12px]">
+                          <summary className="cursor-pointer select-none px-2 py-1 rounded-md bg-slate-100 ring-1 ring-slate-200 text-slate-700">Confidence Breakdown</summary>
+                          <div className="mt-2 space-y-1">
+                            {meta.confidence_factors.map((f,i)=> (
+                              <div key={i} className="flex items-center justify-between gap-2">
+                                <span className="text-gray-600">{f.label}</span>
+                                <span className="font-medium">{f.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 rounded-2xl ring-1 ring-black/5 p-4 bg-white/70">
+                      <p className="text-xs text-gray-500 mb-2 inline-flex items-center gap-1">綜合排名 <span className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-slate-200 text-[10px] text-slate-700" title="依 total = 0.45×Climate + 0.30×Budget + 0.25×Activity 加權排序">?</span></p>
+                      <RankingBar rows={meta.cityScores} />
+                    </div>
+
+                    <div className="mt-4 grid sm:grid-cols-2 gap-3">
+                      {meta.sources.map((s, i) => (
+                        <EvidenceCard key={i} title={s.t} url={s.u} date={s.d} trust={s.trust} supports={s.supports || []} />
+                      ))}
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-3 text-[12px]">
+                      <div className="rounded-xl ring-1 ring-black/5 p-2.5 bg-white/70 flex items-center gap-2">
+                        <Dot status={meta.triggersFired.deltaTemp ? 'warn' : 'ok'} label="來源溫差" />
+                        <Dot status={meta.triggersFired.missing ? 'warn' : 'ok'} label="缺補率" />
+                        <Dot status={meta.triggersFired.lowConfidence ? 'error' : 'ok'} label="信心門檻" />
+                      </div>
+                    </div>
+                  </Section>
+
+                  <Section title="TRAP Logic Derivation" subtitle="更清爽的推導檢視（分頁 / 摺疊）">
+                    <Tabs tabs={[
+                      { label: 'Overview', content: (
+                        <div className="grid sm:grid-cols-2 gap-3">
+                          <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                            <p className="text-xs text-gray-500">Formula</p>
+                            <p className="text-sm font-medium text-gray-900 mt-0.5">{meta.formula}</p>
+                          </div>
+                          <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                            <p className="text-xs text-gray-500">Weights</p>
+                            <div className="flex gap-2 text-[12px]"><Badge className="bg-blue-50 text-blue-700 ring-1 ring-blue-200">Climate {meta.weights.climate}</Badge><Badge className="bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">Budget {meta.weights.budget}</Badge><Badge className="bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-200">Activity {meta.weights.activity}</Badge></div>
+                          </div>
+                        </div>
+                      )},
+                      { label: 'Scores', content: (
+                        <div className="space-y-3">
+                          <CityTable weights={meta.weights} rows={meta.cityScores} />
+                          <details className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                            <summary className="cursor-pointer text-[12px] text-gray-700">Machine‑readable JSON</summary>
+                            <div className="mt-2"><JSONBlock obj={{ weights: meta.weights, scores: meta.cityScores }} /></div>
+                          </details>
+                        </div>
+                      )},
+                      { label: 'Calibration', content: (
+                        <div className="grid sm:grid-cols-3 gap-3">
+                          <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70"><MetricRow label="Method" value={meta.calibration.method} /><MetricRow label="ECE" value={(meta.calibration.ece*100).toFixed(1)+'%'} hint="Expected Calibration Error" /><MetricRow label="Brier" value={meta.calibration.brier.toFixed(3)} /></div>
+                          <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70"><p className="text-xs text-gray-500 mb-1">Uncertainty</p><div className="grid grid-cols-3 gap-2 text-[12px]"><div className="rounded-lg bg-slate-50 ring-1 ring-slate-200 p-2"><span className="text-gray-600">Data</span><div className="font-semibold">{Math.round(meta.uncertainty.data*100)}%</div></div><div className="rounded-lg bg-slate-50 ring-1 ring-slate-200 p-2"><span className="text-gray-600">Model</span><div className="font-semibold">{Math.round(meta.uncertainty.model*100)}%</div></div><div className="rounded-lg bg-slate-50 ring-1 ring-slate-200 p-2"><span className="text-gray-600">Noise</span><div className="font-semibold">{Math.round(meta.uncertainty.noise*100)}%</div></div></div></div>
+                          <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70"><p className="text-xs text-gray-500 mb-1">Confidence</p><ConfidenceBar value={meta.conf} /></div>
+                        </div>
+                      )},
+                      { label: 'Pipeline', content: (
+                        <div className="space-y-3">
+                          <details className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70" open>
+                            <summary className="cursor-pointer text-[12px] text-gray-700">Steps</summary>
+                            <ol className="mt-2 list-decimal pl-4 text-[12px] text-gray-800 space-y-1">{meta.pipeline.map((s,i)=> <li key={i}>{s}</li>)}</ol>
+                          </details>
+                          <details className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                            <summary className="cursor-pointer text-[12px] text-gray-700">Assumptions & Triggers</summary>
+                            <ul className="mt-2 list-disc pl-4 text-[12px] text-gray-800 space-y-1">{meta.assumptions.map((s,i)=> <li key={'a'+i}>{s}</li>)}</ul>
+                            <div className="mt-2 text-[12px] text-gray-600">Triggers：</div>
+                            <ul className="mt-1 list-disc pl-4 text-[12px] text-gray-800 space-y-1">{meta.triggers.map((s,i)=> <li key={'t'+i}>{s}</li>)}</ul>
+                          </details>
+                        </div>
+                      )}
+                    ]} />
+                  </Section>
+
+                  <Section title="Adaptation" subtitle="質疑 → 自動再驗證 / 策略切換 (f′(x; g(f(x), θ)))" right={<Badge className="bg-amber-600 text-white">可手動/自動觸發</Badge>}>
+                    <div className="grid md:grid-cols-3 gap-3">
+                      <div className="rounded-xl p-3 ring-1 ring-black/5 bg-white/70">
+                        <p className="text-xs text-gray-500">策略</p>
+                        <p className="text-sm font-medium text-gray-900 mt-0.5">{meta.reasons[0].title.includes('重新') ? '多來源交叉比對 + 時間窗統一' : '初步資料匯整'}</p>
+                      </div>
+                      <div className="rounded-xl p-3 ring-1 ring-black/5 bg-white/70">
+                        <p className="text-xs text-gray-500">建議</p>
+                        <p className="text-sm font-medium text-gray-900 mt-0.5">{meta.conf < 0.6 ? '建議再感知/人審' : '可接受，若需可再驗證'}</p>
+                      </div>
+                      <div className="rounded-xl p-3 ring-1 ring-black/5 bg-white/70">
+                        <p className="text-xs text-gray-500">版本</p>
+                        <p className="text-sm font-medium text-gray-900 mt-0.5">v{version}</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 rounded-xl bg-amber-50 ring-1 ring-amber-200 p-3 text-xs text-amber-900">
+                      <p className="font-medium">更正說明</p>
+                      <p className="mt-1">{meta.reflection}</p>
+                    </div>
+                  </Section>
+
+                  <Section title="Reflection" subtitle="系統自評（meta-summary）">
+                    <div className="grid sm:grid-cols-3 gap-3">
+                      <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                        <p className="text-xs text-gray-500">Self-confidence</p>
+                        <p className="text-lg font-semibold text-gray-900">{Math.round(meta.conf * 100)}%</p>
+                        <p className="text-[11px] text-gray-600">已校準；當信心 &lt; 60% 將建議再感知</p>
+                      </div>
+                      <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                        <p className="text-xs text-gray-500">Trigger Rules</p>
+                        <ul className="mt-1 text-[12px] text-gray-700 list-disc pl-4 space-y-1">
+                          <li>來源差異 &gt; 1.5°C → Re‑perceive</li>
+                          <li>Confidence &lt; 0.6 → Verify + Human‑in‑loop</li>
+                          <li>年份不一致 → 統一時間窗</li>
+                        </ul>
+                      </div>
+                      <div className="rounded-xl ring-1 ring-black/5 p-3 bg-white/70">
+                        <p className="text-xs text-gray-500">Next Actions</p>
+                        <div className="mt-1 flex flex-wrap gap-2">
+                          <button onClick={send} disabled={isStreaming} className={`rounded-lg px-2.5 py-1 text-[12px] font-medium text-white ${isStreaming ? 'bg-gray-400' : 'bg-slate-900 hover:bg-slate-800'}`}>再問一題</button>
+                          <button onClick={challenge} disabled={isStreaming} className={`rounded-lg px-2.5 py-1 text-[12px] font-medium text-white ${isStreaming ? 'bg-gray-400' : 'bg-amber-600 hover:bg-amber-700'}`}>挑戰此回合</button>
+                          <button className="rounded-lg px-2.5 py-1 text-[12px] font-medium bg-emerald-600 text-white hover:bg-emerald-700">匯出報告</button>
+                        </div>
+                      </div>
+                    </div>
+                  </Section>
+                </>
+              ) : (
+                <Section title="TRAP 面板" subtitle="選擇左側 AI 的一則訊息以檢視其元認知細節" right={<Badge className="bg-slate-900 text-white">待選擇</Badge>}>
+                  <p className="text-sm text-gray-700">點選對話中的 AI 回合，即可在這裡看到 Perception / Reasoning / Transparency / Adaptation / Reflection。</p>
+                </Section>
+              )}
+
+              <footer className="text-[11px] text-gray-500">
+                <p>此示範網站不連網、不使用真實 API；所有數據皆為模擬。Design By NV.JoviChen。</p>
+              </footer>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

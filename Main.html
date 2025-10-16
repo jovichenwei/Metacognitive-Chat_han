@@ -343,7 +343,7 @@
       const [speed, setSpeed] = useState('fast'); // slow | normal | fast
       const chatEndRef = useRef(null);
 
-      // 🔒 固定畫面：移除自動捲動（若要恢復，請參考下方註解）
+      // 固定畫面：移除自動捲動
       // useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isStreaming]);
       // 或：只在訊息完成後捲動
       // useEffect(() => { if (!isStreaming) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
